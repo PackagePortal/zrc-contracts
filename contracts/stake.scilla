@@ -1,0 +1,1096 @@
+scilla_version 0
+
+(***************************************************)
+(*               Associated library                *)
+(***************************************************)
+import IntUtils BoolUtils
+library Staking
+
+let one_msg = 
+  fun (msg : Message) => 
+  let nil_msg = Nil {Message} in
+  Cons {Message} msg nil_msg
+
+let two_msgs =
+fun (msg1 : Message) =>
+fun (msg2 : Message) =>
+  let msgs_tmp = one_msg msg2 in
+  Cons {Message} msg1 msgs_tmp
+
+let blk_leq =
+  fun (blk1 : BNum) =>
+  fun (blk2 : BNum) =>
+    let bc1 = builtin blt blk1 blk2 in 
+    let bc2 = builtin eq blk1 blk2 in 
+    orb bc1 bc2
+    
+let uint128_leq =
+  fun (blk1 : Uint128) =>
+  fun (blk2 : Uint128) =>
+    let bc1 = builtin lt blk1 blk2 in 
+    let bc2 = builtin eq blk1 blk2 in 
+    orb bc1 bc2
+    
+(* globals for easy reuse *)
+let hundred = Uint128 100
+let week = Uint128 7
+let year = Uint128 365
+let zero = Uint128 0
+let intZero = Int32 0
+let two = Uint128 2
+let false = False
+let true = True
+let blkZero = BNum 0
+let uintOne = Uint128 1
+let intZero = Int32 0
+let intOne = Int32 1
+
+(* optional unwrapper helpers *)
+let get_int32_val =
+  fun (some_val: Option Int32) =>
+    match some_val with
+    | Some val => val
+    | None => intZero
+    end
+
+let get_uint128_val =
+  fun (some_val: Option Uint128) =>
+    match some_val with
+    | Some val => val
+    | None => zero
+    end
+
+let get_bnum_val =
+  fun (some_val: Option BNum) =>
+    match some_val with
+    | Some val => val
+    | None => blkZero
+    end
+
+(* error exceptions *)
+let throw_not_authorized    = { _exception : "ErrorNotAuthorized" }
+let throw_insufficient_tokens = { _exception : "ErrorInsufficientTokens" }
+let throw_not_self = { _exception : "ErrorNotSelf" }
+let throw_exceeded = { _exception : "ErrorExceedAvailable" }
+let throw_not_staker = { _exception : "ErrorNotStaker" }
+let throw_block_not_reached = { _exception : "ErrorBlocksNotMet" }
+let throw_no_pending = { _exception : "ErrorNoPendingStake" }
+let throw_not_fungible   = { _exception : "ErrorIncorrectFungible" }
+let throw_not_active   = { _exception : "ErrorStakingInactive" }
+let throw_insufficient_stake = { _exception : "ErrorLessThanMinimumStake" }
+let throw_exceed_stake_limit = { _exception: "ErrorMoreThanMaximumStake" }
+let throw_rewards_block_not_reached = { _exception : "ErrorRewardBlocksNotMet" }
+let throw_wrong_staked_amt = { _exception : "ErrorWrongAmountStaked" }
+let throw_not_impl = { _exception : "ErrorIncorrectImplementation" }
+let throw_is_self = { _exception : "ErrorIsSelf" }
+  
+contract Staking
+(
+  init_owner : ByStr20,
+  init_fungible : ByStr20
+)
+(* contract controls *)
+field admin : ByStr20 = init_owner
+field pending_owner : Option ByStr20 = None {ByStr20}
+field fungibleContract : ByStr20 = init_fungible
+field stakingEnabled : Bool = True
+field whitelistEnabled : Bool = true
+field futureContract : ByStr20 = _this_address
+field implementationContract : ByStr20 = _this_address
+
+(* operators map for whitelist *)
+field operators: Map ByStr20 Bool 
+  = let emp_map = Emp ByStr20 Bool in
+    builtin put emp_map init_owner true
+
+(* staking *)
+field pendingAddStake : Map ByStr20 (Pair (ByStr20) (Uint128)) = Emp ByStr20 (Pair (ByStr20) (Uint128))
+field stakers : Map ByStr20 Uint128 = Emp ByStr20 Uint128
+field removeStaker: Map ByStr20 Uint128 = Emp ByStr20 Uint128
+field removeBlock : Map ByStr20 BNum = Emp ByStr20 BNum
+field totalStaked : Uint128 = Uint128 0
+field totalStakers : Uint128 = Uint128 0
+field cumulativeStakes : Map ByStr20 Bool = Emp ByStr20 Bool
+field pendingRewards : Map ByStr20 Uint128 = Emp ByStr20 Uint128
+field rewardBlocks : BNum = BNum 0
+field lastReward : BNum = BNum 0
+field rewardCadence : Uint128 = Uint128 2200 (* ~ 1 day *)
+field minimumStake : Uint128 = Uint128 1000000
+field maximumStake : Uint128 = Uint128 500000000
+field tokensAvailable : Uint128 = Uint128 0
+field tokensLastAmount : Uint128 = Uint128 0
+
+(* unstaking *)
+field unstakePercent : Uint128 = Uint128 7
+field rewardPercent : Uint128 = Uint128 15
+field unbondingPeriod : Uint64 = Uint64 15400 (* ~ 7 days *)
+field penalty : Uint128 = Uint128 10
+field daily : Bool = True
+field unstakeDays : Uint128 = Uint128 7 
+field penaltyRewardPerStaker : Uint128 = Uint128 0
+field totalUnstaked : Uint128 = Uint128 0
+
+(* cycle controls *)
+field cycleCount : Map ByStr20 Int32 = Emp ByStr20 Int32
+field cycleAmount : Map ByStr20 Uint128 = Emp ByStr20 Uint128
+field rewardCount : Int32 = Int32 10
+field rewardRate : Uint128 = Uint128 1
+
+(* internal procedures *)   
+procedure IsStakingActive()
+  active <- stakingEnabled;
+  match active with
+    | True => 
+    | False => throw throw_not_active
+  end
+end
+
+procedure IsAdmin()
+  current_admin <- admin;
+  is_owner = builtin eq current_admin _sender;
+  match is_owner with
+  | True =>
+  | False => throw throw_not_authorized
+  end
+end
+
+procedure IsFromFungible()
+  fung <- fungibleContract;
+  is_fung = builtin eq fung _sender;
+  match is_fung with
+  | True =>
+  | False => throw throw_not_fungible
+  end
+end
+
+procedure IsImplementation(sender : ByStr20)
+  imp <- implementationContract;
+  is_self = builtin eq imp sender;
+  match is_self with
+  | True => 
+  | False => throw throw_not_self
+  end
+end
+
+procedure IsNotImplementation(sender : ByStr20)
+  imp <- implementationContract;
+  is_self = builtin eq imp sender;
+  match is_self with
+  | True => throw throw_is_self
+  | False => 
+  end
+end
+
+procedure IsNotSelf()
+  is_self = builtin eq _this_address _sender;
+  match is_self with
+  | True => throw throw_is_self
+  | False => 
+  end
+end
+
+procedure IsAuthorized(sender : ByStr20)
+  auth <- operators[sender];
+  enabled <- whitelistEnabled;
+  match auth with
+    | None => 
+      match enabled with
+        | True => throw throw_not_authorized
+        | False => (* no op; whitelist is disabled *)
+      end
+    | Some val => 
+      match val with 
+        | True => (* no op, authorized *)
+        | False => throw throw_not_authorized
+      end
+  end
+end
+
+procedure IsSufficientStake(amount: Uint128)
+  min <- minimumStake;
+  max <- maximumStake;
+  isMin = builtin lt amount min;
+  isMax = builtin lt max amount;
+  match isMin with
+    | True =>
+      throw throw_insufficient_stake
+    | False =>
+      match isMax with
+        | True => 
+          throw throw_exceed_stake_limit
+        | False =>
+      end
+  end
+end
+
+procedure sendFunds(address: ByStr20, amount: Uint128)
+  fungibleAddr <- fungibleContract;
+  msg = {_tag : "Transfer"; _recipient: fungibleAddr; _amount: zero;
+          to: address; amount: amount};
+  msgs = one_msg msg;
+  send msgs
+end
+
+procedure addRewards(staker: Pair ByStr20 Uint128)
+  match staker with
+    | Pair key value  =>
+      stake <- stakers[key];
+      isDaily <- daily;
+      totalStake <- totalStaked;
+      pending <- pendingRewards[key];
+      cumulative <- cumulativeStakes[key];
+      balance = get_uint128_val stake;
+      cycle <- cycleCount[key];
+      match cycle with
+        | Some cycle =>
+          newCycle = builtin add cycle intOne;
+          cycleCount[key] := newCycle
+        | None =>
+      end;
+      onePercent = builtin div balance hundred;
+      rewardRate <- rewardPercent;
+      yearRate = builtin mul onePercent rewardRate;
+      dailyReward = builtin div yearRate year;
+      match isDaily with
+        | True =>
+          match cumulative with
+            | Some cumulative =>
+              match cumulative with
+                | True =>
+                  newAmount = builtin add balance dailyReward;
+                  stakers[key] := newAmount
+                | False =>
+                  (* reduce total stake *)
+                  reducedAmount = builtin sub totalStake dailyReward;
+                  totalStaked := reducedAmount;
+                  match pending with
+                    | Some pending =>
+                      newAmount = builtin add pending dailyReward;
+                      pendingRewards[key] := newAmount
+                    | None =>
+                      pendingRewards[key] := dailyReward
+                  end
+              end
+            | None =>
+          end
+        | False =>
+          weeklyReward = builtin mul dailyReward week;
+          match cumulative with
+            | Some cumulative =>
+              match cumulative with
+                | True =>
+                  newAmount = builtin add balance weeklyReward;
+                  stakers[key] := newAmount
+                | False =>
+                  (* reduce total stake *)
+                  reducedAmount = builtin sub totalStake weeklyReward;
+                  totalStaked := reducedAmount;
+                  match pending with
+                    | Some pending =>
+                      newAmount = builtin add pending weeklyReward;
+                      pendingRewards[key] := newAmount
+                    | None =>
+                      pendingRewards[key] := weeklyReward
+                  end
+              end
+            | None =>
+          end
+      end
+  end
+end
+
+procedure rewardCycle(staker: Pair ByStr20 Uint128)
+  match staker with
+    | Pair key value  =>
+      baseAmount <- cycleAmount[key];
+      currentCount <- cycleCount[key];
+      rewardCounter <- rewardCount;
+      totalTokens <- tokensAvailable;
+      pending <- pendingRewards[key];
+      stake <- stakers[key];
+      rate <- rewardRate;
+      match currentCount with
+        | Some currentCount =>
+          isEqual = builtin eq currentCount rewardCounter;
+          isMore = builtin lt rewardCounter currentCount;
+          check3 = orb isEqual isMore;
+          match check3 with
+            | True =>
+              match baseAmount with
+                | Some baseAmount =>
+                  onePercent = builtin div baseAmount hundred;
+                  (* reduce owner token rate *)
+                  reduceOwner =  builtin sub totalTokens onePercent;
+                  tokensAvailable := reduceOwner;
+                  match pending with
+                    | Some pending =>
+                      newAmount = builtin add pending onePercent;
+                      pendingRewards[key] := newAmount;
+                      cycleCount[key] := intZero;
+                      match stake with
+                        | Some stake => 
+                          cycleAmount[key] := stake
+                        | None =>
+                      end
+                    | None =>
+                      pendingRewards[key] := onePercent;
+                      cycleCount[key] := intZero;
+                      match stake with
+                        | Some stake => 
+                          cycleAmount[key] := stake
+                        | None =>
+                      end
+                  end
+                | None =>
+              end
+            | False =>
+          end
+        | None =>
+      end
+  end
+end
+
+procedure addUnstakeReward(staker: Pair ByStr20 Uint128)
+  match staker with
+    | Pair key value  =>
+      staking <- removeStaker[key];
+      isDaily <- daily;
+      pending <- pendingRewards[key];
+      totalTokens <- tokensAvailable;
+      balance = get_uint128_val staking;
+      onePercent = builtin div balance hundred;
+      rewardRate <- unstakePercent;
+      yearRate = builtin mul onePercent rewardRate;
+      dailyReward = builtin div yearRate year;
+      match isDaily with
+        | True =>
+          (* reduce owner token rate *)
+          reduceOwner =  builtin sub totalTokens dailyReward;
+          tokensAvailable := reduceOwner;
+          match pending with
+            | Some pending =>
+              newAmount = builtin add pending dailyReward;
+              pendingRewards[key] := newAmount
+            | None =>
+              pendingRewards[key] := dailyReward
+          end
+        | False =>
+          weeklyReward = builtin mul dailyReward week;
+          (* reduce owner token rate *)
+          reduceOwner =  builtin sub totalTokens weeklyReward;
+          tokensAvailable := reduceOwner;
+          match pending with
+            | Some pending =>
+              newAmount = builtin add pending weeklyReward;
+              pendingRewards[key] := newAmount
+            | None =>
+              pendingRewards[key] := weeklyReward
+          end
+      end
+  end
+end
+
+procedure penaltyToStakers(staker: Pair ByStr20 Uint128)
+  match staker with
+    | Pair key value  =>
+      pending <- pendingRewards[key];
+      reward <- penaltyRewardPerStaker;
+      match pending with
+        | Some pending =>
+          newAmount = builtin add pending reward;
+          pendingRewards[key] := newAmount
+        | None =>
+          pendingRewards[key] := reward
+      end
+  end
+end
+
+procedure processStakeRequest(sender: ByStr20, amount: Uint128)
+  pendingAdd <- pendingAddStake[sender];
+  match pendingAdd with
+    | None =>
+      stakedAmount <- stakers[sender];
+      match stakedAmount with
+        | Some stakedAmount =>
+          newAmount = builtin add stakedAmount amount;
+          stakers[sender] := newAmount;
+          currentStake <- totalStaked;
+          newAmount = builtin add currentStake amount;
+          totalStaked := newAmount
+        | None =>
+          stakers[sender] := amount;
+          cumulativeStakes[sender] := true;
+          cycleCount[sender] := intZero;
+          cycleAmount[sender] := amount;
+          currentStake <- totalStaked;
+          newAmount = builtin add currentStake amount;
+          totalStaked := newAmount;
+          current_staker <- totalStakers;
+          newStaker = builtin add current_staker uintOne;
+          totalStakers := newStaker
+      end
+    | Some pendingStaker =>
+      (* "approve" a proxily-added pending stake *)
+      match pendingStaker with
+        | Pair addressOfStaker amountAdding =>
+          isEqualPaid = builtin eq amountAdding amount;
+          IsAuthorized addressOfStaker;
+          match isEqualPaid with
+            | False =>
+              delete pendingAddStake[sender];
+              throw throw_wrong_staked_amt
+            | True =>
+              delete pendingAddStake[sender];
+              stakedAmount <- stakers[addressOfStaker];
+              match stakedAmount with
+                | Some stakedAmount =>
+                  newAmount = builtin add stakedAmount amount;
+                  stakers[addressOfStaker] := newAmount;
+                  currentStake <- totalStaked;
+                  newAmount = builtin add currentStake amount;
+                  totalStaked := newAmount
+                | None =>
+                  stakers[addressOfStaker] := amount;
+                  cumulativeStakes[addressOfStaker] := true;
+                  cycleCount[addressOfStaker] := intZero;
+                  cycleAmount[addressOfStaker] := amount;
+                  currentStake <- totalStaked;
+                  newAmount = builtin add currentStake amount;
+                  totalStaked := newAmount;
+                  current_staker <- totalStakers;
+                  newStaker = builtin add current_staker uintOne;
+                  totalStakers := newStaker
+              end
+          end
+      end 
+  end
+end
+
+transition Init()
+  IsAdmin;
+  currentValue <- rewardBlocks;
+  lastRewarded <- lastReward;
+  rewardTimeBlock <- rewardCadence;
+  currentBlock <- & BLOCKNUMBER;
+  newRewardBlock = builtin badd currentBlock rewardTimeBlock;
+  rewardBlocks := newRewardBlock;
+  lastReward := currentBlock
+end
+
+transition RewardAll()
+  IsAdmin;
+  currentBlk <- & BLOCKNUMBER;
+  rewardBlock <- rewardBlocks;
+  isBlockHigher = blk_leq currentBlk rewardBlock;
+  match isBlockHigher with
+    | True =>
+      throw throw_block_not_reached
+    | False =>
+      currentStake <- totalStaked;
+      currentUnstake <- totalUnstaked;
+      tokensAdded <- tokensAvailable;
+      tokensLastAmount := tokensAdded;
+      stakeRate <- rewardPercent;
+      unstakeRate <- unstakePercent;
+      isDaily <- daily;
+      
+      onePercentStake = builtin div currentStake hundred;
+      onePercentUnstake = builtin div currentUnstake hundred;
+      stakeRatePerYear = builtin mul onePercentStake stakeRate;
+      unstakeRatePerYear = builtin mul onePercentUnstake unstakeRate;
+      stakeDailyRate = builtin div stakeRatePerYear year;
+      unstakeDailyRate = builtin div unstakeRatePerYear year;
+      stakesCost = builtin add unstakeDailyRate stakeDailyRate;
+      
+      match isDaily with
+        | True =>
+          enoughTokens = builtin lt tokensAdded stakesCost;
+          match enoughTokens with
+            | True =>
+              throw throw_insufficient_tokens
+            | False =>
+              (* staking rewards *)
+              stake <- stakers;
+              staker_list = builtin to_list stake;
+              newStake = builtin add currentStake stakeDailyRate;
+              reduceOwner = builtin sub tokensAdded stakeDailyRate;
+              tokensAvailable := reduceOwner;
+              totalStaked := newStake;
+              forall staker_list addRewards;
+              
+              (* unstaking rewards *)
+              unstake <- removeStaker;
+              unstaker_list = builtin to_list unstake;
+              forall unstaker_list addUnstakeReward;
+              
+              currentBlockCycle <- rewardBlocks;
+              rewardTimeBlock <- rewardCadence;
+              newRewardBlock = builtin badd currentBlockCycle rewardTimeBlock;
+              rewardBlocks := newRewardBlock;
+              lastReward := currentBlockCycle;
+              
+              initialTokens <- tokensLastAmount;
+              tokenBalance <- tokensAvailable;
+              totalrewarded = builtin sub initialTokens tokenBalance;
+              event_rewardsGiven = { _eventname: "RewardAllSuccess"; block: currentBlk; rewardGiven: totalrewarded};
+              event event_rewardsGiven
+          end
+        | False => (* weekly rewarding *)
+          stakeWeeklyRate = builtin mul stakeDailyRate week;
+          unstakeWeeklyRate = builtin mul unstakeDailyRate week;
+          stakeTotalRequired = builtin add stakeWeeklyRate unstakeWeeklyRate;
+          
+          enoughTokens = builtin lt tokensAdded stakeTotalRequired;
+          
+          match enoughTokens with
+            | True =>
+              throw throw_insufficient_tokens
+            | False =>
+              (* staker rewards *)
+              stake <- stakers;
+              staker_list = builtin to_list stake;
+              newStake = builtin add currentStake stakeWeeklyRate;
+              reduceOwner = builtin sub tokensAdded stakeWeeklyRate;
+              tokensAvailable := reduceOwner;
+              totalStaked := newStake;
+              forall staker_list addRewards;
+              
+              
+              (* unstake rewards *)
+              unstake <- removeStaker;
+              staker_list = builtin to_list unstake;
+              forall staker_list addUnstakeReward;
+              
+              currentBlockCycle <- rewardBlocks;
+              rewardTimeBlock <- rewardCadence;
+              newRewardBlock = builtin badd currentBlockCycle rewardTimeBlock;
+              rewardBlocks := newRewardBlock;
+              lastReward := currentBlockCycle;
+              
+              initialTokens <- tokensLastAmount;
+              tokenBalance <- tokensAvailable;
+              totalrewarded = builtin sub initialTokens tokenBalance;
+              event_rewardsGiven = { _eventname: "RewardAllSuccess"; block: currentBlk; rewardGiven: totalrewarded};
+              event event_rewardsGiven    
+          end
+      end
+  end
+end
+
+transition RewardCycleRewards()
+  IsAdmin;
+  currentBlk <- & BLOCKNUMBER;
+  currentStake <- totalStaked;
+  tokensAdded <- tokensAvailable;
+  tokensLastAmount := tokensAdded;
+
+  (* cycle rewards *)
+  cycle <- cycleAmount;
+  cycleAmount_list = builtin to_list cycle;
+  forall cycleAmount_list rewardCycle;
+  
+  initialTokens <- tokensLastAmount;
+  tokenBalance <- tokensAvailable;
+  totalrewarded = builtin sub initialTokens tokenBalance;
+  event_cycleRewardsGiven = { _eventname: "RewardCycleRewardsSuccess"; block: currentBlk; rewardGiven: totalrewarded};
+  event event_cycleRewardsGiven
+end
+
+(* allow for staker to toggle automatic cumulative staking option *)
+transition ToggleCumulative()
+  cul <- cumulativeStakes[_sender];
+  match cul with
+    | Some cul =>
+      match cul with (* flip mechanism, vs. defining *)
+        | True =>
+          cumulativeStakes[_sender] := false
+        | False =>
+          cumulativeStakes[_sender] := true
+      end
+    | None =>
+      throw throw_not_staker
+  end
+end
+
+(* incoming stake submission *)
+transition RecipientAcceptTransfer(sender: ByStr20, recipient: ByStr20, amount: Uint128)
+  IsAuthorized sender;
+  IsFromFungible; (* ensure correct token being staked *)
+  IsStakingActive; (* ensure staking is active *)
+  IsNotSelf;
+  IsSufficientStake amount; (* ensure sufficient minimum stake/ doesn't exceed maximum *)
+  owner <- admin;
+  isOwner = builtin eq sender owner;
+  match isOwner with
+    | True => (* contract owner can't stake; instead - supply replenish *)
+      totalTokens <- tokensAvailable;
+      newSupply = builtin add totalTokens amount;
+      tokensAvailable := newSupply
+    | False => 
+      processStakeRequest sender amount
+  end
+end
+
+transition TransferSuccessCallBack(sender: ByStr20, recipient: ByStr20, amount: Uint128)
+end
+
+(* withdraw pending rewards *)
+transition WithdrawRewards()
+  pending <- pendingRewards[_sender];
+  match pending with
+    | Some pending =>
+      delete pendingRewards[_sender];
+      sendFunds _sender pending
+    | None =>
+      throw throw_no_pending
+  end
+end
+
+(* unstake *)
+transition RemoveStake(amount: Uint128)
+  accBalance <- stakers[_sender];
+  total_staked <- totalStaked;
+  total_unstaked <- totalUnstaked;
+  match accBalance with
+    | Some accBalance =>
+      fullWithdrawal = uint128_ge amount accBalance;
+      match fullWithdrawal with
+        | False =>
+          minStake <- minimumStake;
+          newBalance = builtin sub accBalance amount;
+          IsSufficientStake newBalance;
+
+          checkPending <- removeStaker[_sender];
+          newStaked = builtin sub total_staked amount;
+          totalStaked := newStaked;
+          newUnstaked = builtin add total_unstaked amount;
+          totalUnstaked := newUnstaked;
+          match checkPending with
+            | Some checkPending =>
+              (* if any pending, add to it *)
+              newAmount = builtin add checkPending amount;
+              removeStaker[_sender] := newAmount;
+              remove_block <- unbondingPeriod;
+              current_block <- & BLOCKNUMBER;
+              block_required = builtin badd current_block remove_block;
+              removeBlock[_sender] := block_required;
+              
+              stakers[_sender] := newBalance;
+              cycleAmount[_sender] := newBalance;
+              cycleCount[_sender] := intZero
+            | None =>
+              removeStaker[_sender] := amount;
+              remove_block <- unbondingPeriod;
+              current_block <- & BLOCKNUMBER;
+              block_required = builtin badd current_block remove_block;
+              removeBlock[_sender] := block_required;
+              stakers[_sender] := newBalance;
+              cycleAmount[_sender] := newBalance;
+              cycleCount[_sender] := intZero
+
+          end
+        | True =>
+          checkPending <- removeStaker[_sender];
+          newStaked = builtin sub total_staked accBalance;
+          totalStaked := newStaked;
+          newUnstaked = builtin add total_unstaked accBalance;
+          totalUnstaked := newUnstaked;
+          match checkPending with
+            | Some checkPending =>
+              newAmount = builtin add checkPending accBalance;
+              removeStaker[_sender] := newAmount;
+              remove_block <- unbondingPeriod;
+              current_block <- & BLOCKNUMBER;
+              block_required = builtin badd current_block remove_block;
+              removeBlock[_sender] := block_required;
+              delete stakers[_sender];
+              delete cycleAmount[_sender];
+              delete cycleCount[_sender];
+              
+              current_stake <- totalStakers;
+              new_stakers = builtin sub current_stake uintOne;
+              totalStakers := new_stakers
+            | None =>
+              removeStaker[_sender] := accBalance;
+              remove_block <- unbondingPeriod;
+              current_block <- & BLOCKNUMBER;
+              block_required = builtin badd current_block remove_block;
+              removeBlock[_sender] := block_required;
+              delete stakers[_sender];
+              delete cycleAmount[_sender];
+              delete cycleCount[_sender];
+              
+              current_stake <- totalStakers;
+              new_stakers = builtin sub current_stake uintOne;
+              totalStakers := new_stakers
+          end
+      end
+    | None =>
+      throw throw_not_staker
+  end
+end
+
+(* withdraw pending stake *)
+transition WithdrawStake()
+  current_block <- & BLOCKNUMBER;
+  blocks_required <- removeBlock[_sender];
+  total_unstake <- totalUnstaked;
+  match blocks_required with
+    | None =>
+    | Some blocks_required =>
+      is_more = blk_leq blocks_required current_block;
+      match is_more with
+        | True =>
+          amount <- removeStaker[_sender];
+          match amount with
+            | None =>
+            | Some amount =>
+              newUnstaked = builtin sub total_unstake amount;
+              totalUnstaked := newUnstaked;
+              sendFunds _sender amount;
+              delete removeBlock[_sender];
+              delete removeStaker[_sender]
+          end
+        | False =>
+          throw throw_block_not_reached
+      end
+  end
+end
+
+(* instant full withdraw *)
+transition InstantWithdrawal()
+  rate <- rewardPercent;
+  total_unstake <- totalUnstaked;
+  penaltyRate <- penalty;
+  days <- unstakeDays;
+  number_of_stakers <- totalStakers;
+  amount <- removeStaker[_sender];
+  match amount with
+    | None =>
+    | Some amount =>
+      onePercent = builtin div amount hundred;
+      penaltyFee = builtin mul onePercent penaltyRate;
+      apyRate = builtin mul onePercent rate;
+      dailyRate = builtin div apyRate year;
+      unbondFee = builtin mul dailyRate days;
+      totalPenalty = builtin add penaltyFee unbondFee;
+      returnedAmount = builtin sub amount totalPenalty;
+      
+      perStaker = builtin div totalPenalty number_of_stakers;
+      penaltyRewardPerStaker := perStaker;
+      stake <- stakers;
+      staker_list = builtin to_list stake;
+      forall staker_list penaltyToStakers;
+      newUnstaked = builtin sub total_unstake amount;
+      totalUnstaked := newUnstaked;
+      sendFunds _sender returnedAmount;
+      delete removeBlock[_sender];
+      delete removeStaker[_sender]
+  end
+end
+
+(* proxily adds/removes a pending stake; actual staker needs to "approve" by sending the funds eventually.. *)
+transition AddPendingStakeAddForOther(address: ByStr20, amount: Uint128)
+  newPair = Pair {(ByStr20) (Uint128)} address amount;
+  pendingAddStake[_sender] := newPair;
+  msg  = {_tag : "pendingStake"; _recipient : _sender; _amount : Uint128 0; address: address; amount: amount};
+  msgs = one_msg msg;
+  send msgs
+end
+
+transition RemovePendingStakeAddForOther()
+  delete pendingAddStake[_sender]
+end
+
+
+transition OwnerWithdrawAdded(amount: Uint128)
+  IsAdmin;
+  admin <- admin;
+  totalTokens <- tokensAvailable;
+  amountNotOk = builtin lt totalTokens amount;
+  match amountNotOk with
+    | True =>
+      (* exceeded available *)
+      throw throw_exceeded
+    | False =>
+      sendFunds admin amount;
+      newAmount = builtin sub totalTokens amount;
+      tokensAvailable := newAmount
+  end
+end
+
+(* update cycle rewards cadence *)
+transition UpdateCycleEpochCount(cycle: Int32)
+  IsAdmin;
+  rewardCount := cycle
+end
+
+(* update stake reward cadence *)
+transition UpdateRewardBlocks(block: Uint128)
+  IsAdmin;
+  rewardCadence := block
+end
+
+(* update unstake unbonding duration *)
+transition UpdateUnstakeBlocks(blocks: Uint64)
+  IsAdmin;
+  unbondingPeriod := blocks
+end
+
+transition UpdateUnstakeRate(rate: Uint128)
+  IsAdmin;
+  unstakePercent := rate
+end
+
+transition UpdatePenalty(rate: Uint128, days: Uint128)
+  IsAdmin;
+  penalty := rate;
+  unstakeDays := days
+end
+
+transition UpdateRewardPercent(rate: Uint128)
+  IsAdmin;
+  rewardPercent := rate
+end
+
+transition ToggleDailyToWeekly()
+  IsAdmin;
+  isDaily <- daily;
+  match isDaily with
+    | True =>
+      daily := false
+    | False =>
+      daily := true
+  end
+end
+
+transition UpdateMinimumStake(amount: Uint128)
+  IsAdmin;
+  minimumStake := amount
+end
+
+transition UpdateMaximumStake(amount: Uint128)
+  IsAdmin;
+  maximumStake := amount
+end
+
+(* update contract implementations *)
+transition UpgradeFungibleImplementationTo(newImplementation: ByStr20)
+  IsAdmin;
+  fungibleContract := newImplementation
+end
+
+transition UpgradeImplementationTo(newImplementation: ByStr20)
+  IsAdmin;
+  implementationContract := newImplementation
+end
+
+transition UpgradeFutureImplementationTo(newImplementation: ByStr20)
+  IsAdmin;
+  futureContract := newImplementation
+end
+
+(* update operator *)
+transition UpdateOperator(recipient: ByStr20, allowed: Bool)
+  IsAdmin;
+  operators[recipient] := allowed
+end
+
+(* toggle honoring the whitelist *)
+transition ToggleWhitelist(enabled: Bool)
+  IsAdmin;
+  whitelistEnabled := enabled
+end
+
+transition ToggleStaking(enabled: Bool)
+  IsAdmin;
+  stakingEnabled := enabled
+end
+
+(* stakes / unstakes migration *)
+transition TransferStakeToNew(staker_address: ByStr20, staked_amount: Uint128, cycleAmount: Uint128, cycleCount: Int32)
+  IsImplementation _sender;
+  pendingStake <- stakers[staker_address];
+  match pendingStake with
+    | Some pend =>
+      newAmount = builtin add pend staked_amount;
+      stakers[staker_address] := newAmount;
+      cycleAmount[staker_address] := cycleAmount;
+      cycleCount[staker_address] := cycleCount
+    | None =>
+      stakers[staker_address] := staked_amount;
+      cycleAmount[staker_address] := cycleAmount;
+      cycleCount[staker_address] := cycleCount;
+      stakers <- totalStakers;
+      newStaker = builtin add stakers uintOne;
+      totalStakers := newStaker
+  end;
+  staked <- totalStaked;
+  newStaked = builtin add staked staked_amount;
+  totalStaked := newStaked;
+  
+  msg = {_tag : "TransferStakeSuccessfulCallBack"; _recipient: _sender; _amount: Uint128 0;
+          address : staker_address};
+  msgs = one_msg msg;
+  send msgs
+end
+
+
+transition TransferUnstakeToNew(staker_address: ByStr20, unstaked_amount: Uint128, unstaked_blocks: BNum)
+  IsImplementation _sender;
+  pendUnstake <- removeStaker[staker_address];
+  match pendUnstake with
+    | Some pend =>
+      newUnstake = builtin add pend unstaked_amount;
+      removeStaker[staker_address] := newUnstake;
+      removeBlock[staker_address] := unstaked_blocks
+    | None =>
+      removeStaker[staker_address] := unstaked_amount;
+      removeBlock[staker_address] := unstaked_blocks
+  end;
+  unstaked <- totalUnstaked;
+  newUnstaked = builtin add unstaked unstaked_amount;
+  totalUnstaked := newUnstaked; 
+  msg = {_tag : "TransferUnstakeSuccessfulCallBack"; _recipient: _sender; _amount: Uint128 0;
+          address : staker_address};
+  msgs = one_msg msg;
+  send msgs
+end
+
+transition TransferStakeToNewContract(address: ByStr20)
+  IsAdmin;
+  futureAddr <- futureContract;
+  stakers_amount <- stakers[address];
+  cyc_amount <- cycleAmount[address];
+  cyc_Count <- cycleCount[address];
+  stake_amount = get_uint128_val stakers_amount;
+  cycle_Amount = get_uint128_val cyc_amount;
+  cycle_Count = get_int32_val cyc_Count;
+  msg = {_tag : "TransferStakeToNew"; _recipient: futureAddr; _amount: Uint128 0;
+          staker_address: address;staked_amount: stake_amount; cycleAmount : cycle_Amount; cycleCount: cycle_Count};
+  msgs = one_msg msg;
+  send msgs
+end
+
+transition TransferUnstakeToNewContract(address: ByStr20)
+  IsAdmin;
+  futureAddr <- futureContract;
+  unstakeAmount <- removeStaker[address];
+  unstakeBlock <- removeBlock[address];
+  unstaked_amount = get_uint128_val unstakeAmount;
+  unstaked_block =  get_bnum_val unstakeBlock;
+  msg = {_tag : "TransferUnstakeToNew"; _recipient: futureAddr; _amount: Uint128 0;
+          staker_address: address;unstaked_amount: unstaked_amount; unstaked_blocks: unstaked_block};
+  msgs = one_msg msg;
+  send msgs
+end
+
+transition TransferStakeSuccessfulCallBack(address: ByStr20)
+  futureAddr <- futureContract;
+  isFuture = builtin eq futureAddr _sender;
+  match isFuture with
+    | True =>
+      amount_toReturn <- stakers[address];
+      send_amount = get_uint128_val amount_toReturn;
+      total_staked <- totalStaked;
+      newStaked = builtin sub total_staked send_amount;
+      totalStaked := newStaked;
+      total_stakers <- totalStakers;
+      newStakerAmount = builtin sub total_stakers uintOne;
+      totalStakers := newStakerAmount;
+      delete stakers[address];
+      delete cycleAmount[address];
+      delete cycleCount[address];
+      sendFunds futureAddr send_amount
+    | False =>
+      throw throw_not_self
+  end
+end
+
+transition TransferUnstakeSuccessfulCallBack(address: ByStr20)
+  futureAddr <- futureContract;
+  isFuture = builtin eq futureAddr _sender;
+  match isFuture with
+    | True =>
+      amount_toReturn <- removeStaker[address];
+      send_amount = get_uint128_val amount_toReturn;
+      total_unstaked <- totalUnstaked;
+      newUnstaked = builtin sub total_unstaked send_amount;
+      totalUnstaked := newUnstaked;
+      delete removeStaker[address];
+      delete removeBlock[address];
+      sendFunds futureAddr send_amount
+    | False =>
+      throw throw_not_self
+  end
+end
+
+(*
+transition Migrate(
+  legacy_contract: ByStr20 with contract
+    field pendingAddStake: Map ByStr20 (Pair (ByStr20) (Uint128)),
+    field stakers: Map ByStr20 Uint128,
+    field removeStaker: Map ByStr20 Uint128,
+    field removeBlock: Map ByStr20 BNum,
+    field totalStaked: Uint128,
+    field totalStakers: Uint128,
+    field cumulativeStakes: Map ByStr20 Bool,
+    field pendingRewards: Map ByStr20 Uint128,
+    field rewardBlocks: BNum,
+    field lastReward: BNum,
+    field operators: Map ByStr20 Bool
+  end
+)
+  IsAdmin;
+  
+  pendingAddStake <- & legacy_contract.pendingAddStake;
+  stakers <- & legacy_contract.stakers;
+  removeStaker <- & legacy_contract.removeStaker;
+  removeBlock <- & legacy_contract.removeBlock;
+  totalStaked <- & legacy_contract.totalStaked;
+  totalStakers <- & legacy_contract.totalStakers;
+  cumulativeStakes <- & legacy_contract.cumulativeStakes;
+  pendingRewards <- & legacy_contract.pendingRewards;
+  rewardBlocks <- & legacy_contract.rewardBlocks;
+  lastReward <- & legacy_contract.lastReward;
+  operators <- & legacy_contract.operators;
+
+  pendingAddStake := pendingAddStake;
+  stakers := stakers;
+  removeStaker := removeStaker;
+  removeBlock := removeBlock;
+  totalStaked := totalStaked;
+  totalStakers := totalStakers;
+  cumulativeStakes := cumulativeStakes;
+  pendingRewards = pendingRewards;
+  rewardBlocks := rewardBlocks;
+  lastReward := lastReward;
+  operators := operators;
+
+  e = {_eventname : "DataMigrated" };
+  event e
+end*)
+
+(* staking contract ownership transitions *)
+transition RequestOwnershipTransfer(newOwner: ByStr20)
+  IsAdmin;
+  po = Some {ByStr20} newOwner;
+  pending_owner := po
+end
+
+transition ConfirmOwnershipTransfer()
+  optional_po <- pending_owner;
+  match optional_po with
+  | Some pend_owner =>
+      caller_is_new_owner = builtin eq _sender pend_owner;
+      match caller_is_new_owner with
+      | True =>
+          (* transfer ownership *)
+          admin := pend_owner;
+          none = None {ByStr20};
+          pending_owner := none
+      | False => (* the caller is not the new owner, do nothing *)
+      end
+  | None => (* ownership transfer is not in-progress, do nothing *)
+  end
+end

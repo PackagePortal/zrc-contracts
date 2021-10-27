@@ -1,0 +1,14 @@
+# macos
+.DS_Store
+**/.DS_Store
+
+*/node_modules/
+devops/*.terraform
+*.local.json
+*.DS_Store
+*.env
+**/*.tfvars
+**/node_modules
+**/dist
+**/yarn-error.log
+

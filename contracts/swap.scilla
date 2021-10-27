@@ -1,0 +1,214 @@
+scilla_version 0
+
+import BoolUtils IntUtils
+
+library TokenSwap
+
+let zero = Uint128 0
+let one = Uint128 1
+let false = False
+let true = True
+
+let oneMsg : Message -> List Message =
+  fun (msg : Message) =>
+    let nil_msg = Nil {Message} in
+    Cons {Message} msg nil_msg
+
+(* computes the amount of the fraction x / y *)
+let frac : Uint128 -> Uint128 -> Option Uint128  =
+  fun (x : Uint128) =>
+  fun (y : Uint128) =>
+    let x_over_y = builtin div x y in
+    builtin to_uint128 x_over_y
+    
+
+(* error events *)
+let throw_not_authorized = { _exception : "ErrorNotAuthorized" }
+let throw_not_allowed =
+  fun (r : ByStr20) => { _exception : "ErrorNotAllowed" ; recipient : r }   
+let throw_insufficient = 
+  fun (a : Uint128) => { _exception : "ErrorNotSufficientAmountToSwap" ; amount : a }
+let throw_invalid_value = { _exception : "ErrorInvalidValue" }
+let throw_not_xport = { _exception : "ErrorNotXPORT" }
+
+contract TokenSwap
+(
+  init_owner : ByStr20,
+  init_wallet: ByStr20,
+  init_fung_implementation: ByStr20,
+  init_xport_implementation: ByStr20
+)
+
+field admin : ByStr20 = init_owner
+field pending_owner : Option ByStr20 = None {ByStr20}
+field wallet : ByStr20 = init_wallet (* PORT wallet *)
+field fung_implementation : ByStr20 = init_fung_implementation (* PORT contract *)
+field xport_implementation : ByStr20 = init_xport_implementation (* XPORT contract *)
+
+field min_token_amount : Uint128 = Uint128 50000 (* 5 XPORT *)
+field denom : Uint128 = Uint128 100 (* denom conversion: e.g  100 XPORT = 1 PORT; divide by 100 *)
+field whitelist_enabled : Bool = true
+
+(* operators map of allowed participants *)
+field operators: Map ByStr20 Bool 
+  = let emp_map = Emp ByStr20 Bool in
+    builtin put emp_map init_owner true
+
+(* internal procedures *)    
+procedure IsAdmin()
+  current_admin <- admin;
+  is_owner = builtin eq current_admin _sender;
+  match is_owner with
+  | True =>
+  | False => throw throw_not_authorized
+  end
+end
+
+procedure IsXport()
+  current_xport <- xport_implementation;
+  is_xport = builtin eq current_xport _sender;
+  match is_xport with
+  | True =>
+  | False => throw throw_not_xport
+  end
+end
+
+procedure IsAuthorized()
+  auth <- operators[_sender];
+  whitelist_enabled <- whitelist_enabled;
+  
+  match auth with
+    | None => 
+      match whitelist_enabled with
+        | True => throw throw_not_authorized
+        | False => (* no op; whitelist is disabled *)
+      end
+    | Some val => 
+      match val with 
+        | True => (* no op, authorized *)
+        | False => throw throw_not_authorized
+      end
+  end
+end
+
+procedure IsSufficient(amount : Uint128)
+  min <- min_token_amount;
+  low = builtin lt amount min;
+  
+  match low with
+    | True => 
+      t = throw_insufficient amount;
+      throw t
+    | False => (* no op, sufficient *)
+  end
+end
+
+procedure Exchange(recipient_address : ByStr20, amount : Uint128)
+  fung_implementation_ <- fung_implementation;
+  wallet_ <- wallet;
+  denom_ <- denom;
+  
+  (* conversion *)
+  amt = frac amount denom_;
+  
+  match amt with
+  | None => throw throw_invalid_value
+  | Some val => 
+    (* process exchange*)
+    msg_to_token = {
+      _tag : "TransferFrom"; _recipient: fung_implementation_; _amount: zero;
+      from: wallet_; to: recipient_address; amount: val
+    };
+    msgs = oneMsg msg_to_token;
+    send msgs
+  end
+end
+
+(* inbound transfer *)
+transition RecipientAcceptTransfer(sender: ByStr20, recipient: ByStr20, amount: Uint128)
+  IsAuthorized;
+  IsSufficient amount;
+  IsXport;
+  
+  Exchange sender amount
+end 
+
+transition RecipientAcceptTransferFrom(initiator : ByStr20, sender : ByStr20, recipient : ByStr20, amount : Uint128)
+  is_valid_transfer_to_self =
+    let self_triggered = builtin eq initiator _this_address in
+    let is_transfer_to_self = builtin eq recipient _this_address in
+    andb self_triggered is_transfer_to_self;
+
+  match is_valid_transfer_to_self with
+  | False => 
+    e = throw_not_allowed sender;
+    throw e
+  | True => (* no op *)
+  end
+end
+
+(* ownership management *)
+transition RequestOwnershipTransfer(newOwner : ByStr20)
+  IsAdmin;
+  po = Some {ByStr20} newOwner;
+  pending_owner := po
+end
+
+transition ConfirmOwnershipTransfer()
+  optional_po <- pending_owner;
+  match optional_po with
+  | Some pend_owner =>
+      caller_is_new_owner = builtin eq _sender pend_owner;
+      match caller_is_new_owner with
+      | True =>
+          (* transfer ownership *)
+          admin := pend_owner;
+          none = None {ByStr20};
+          pending_owner := none
+      | False => (* the caller is not the new owner, do nothing *)
+      end
+  | None => (* ownership transfer is not in-progress, do nothing *)
+  end
+end
+
+(* set denom *)
+transition SetDenom(denom: Uint128)
+  IsAdmin;
+  denom := denom
+end
+
+(* set min *)
+transition SetMin(min: Uint128)
+  IsAdmin; 
+  min_token_amount := min
+end
+
+(* update operator *)
+transition UpdateOperator(recipient: ByStr20, allowed: Bool)
+  IsAdmin;
+  
+  operators[recipient] := allowed
+end
+
+(* toggle honoring the whitelist *)
+transition ToggleWhitelist(enabled: Bool)
+  IsAdmin;
+  whitelist_enabled := enabled
+end
+
+transition UpgradeFungibleImplimentationTo(newImplementation: ByStr20)
+  IsAdmin;
+  fung_implementation := newImplementation
+end
+
+transition UpgradeWalletOwner(newOwner: ByStr20)
+  IsAdmin; 
+  wallet := newOwner
+end
+
+(* callbacks *)
+transition TransferFromSuccessCallBack(initiator : ByStr20, sender : ByStr20, recipient : ByStr20, amount : Uint128)
+end
+
+transition TransferSuccessCallBack(sender : ByStr20, recipient : ByStr20, amount : Uint128)
+end
