@@ -1,2 +1,7 @@
 # zrc-contracts
-package portal's smart contracts
+
+## contracts
+see: `/contracts`
+
+## specs
+see: `/specs`
