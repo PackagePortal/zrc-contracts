@@ -36,18 +36,19 @@ contract TokenSwap
   init_owner : ByStr20,
   init_wallet: ByStr20,
   init_fung_implementation: ByStr20,
-  init_xport_implementation: ByStr20
+  init_xport_contract: ByStr20,
+  previous_contract: ByStr20 with contract field operators: Map ByStr20 Bool end
 )
 
-field admin : ByStr20 = init_owner
-field pending_owner : Option ByStr20 = None {ByStr20}
 field wallet : ByStr20 = init_wallet (* PORT wallet *)
 field fung_implementation : ByStr20 = init_fung_implementation (* PORT contract *)
-field xport_implementation : ByStr20 = init_xport_implementation (* XPORT contract *)
+field xport_contract : ByStr20 = init_xport_contract (* XPORT contract *)
 
 field min_token_amount : Uint128 = Uint128 50000 (* 5 XPORT *)
 field denom : Uint128 = Uint128 100 (* denom conversion: e.g  100 XPORT = 1 PORT; divide by 100 *)
-field whitelist_enabled : Bool = true
+field admin : ByStr20 = init_owner
+field pending_owner : Option ByStr20 = None {ByStr20}
+field whitelist_enabled : Bool = false
 
 (* operators map of allowed participants *)
 field operators: Map ByStr20 Bool 
@@ -65,7 +66,7 @@ procedure IsAdmin()
 end
 
 procedure IsXport()
-  current_xport <- xport_implementation;
+  current_xport <- xport_contract;
   is_xport = builtin eq current_xport _sender;
   match is_xport with
   | True =>
@@ -73,8 +74,8 @@ procedure IsXport()
   end
 end
 
-procedure IsAuthorized()
-  auth <- operators[_sender];
+procedure IsAuthorized(sender: ByStr20)
+  auth <- operators[sender];
   whitelist_enabled <- whitelist_enabled;
   
   match auth with
@@ -103,6 +104,14 @@ procedure IsSufficient(amount : Uint128)
   end
 end
 
+procedure SetAuthorizationTrue(recipient: ByStr20)
+  operators[recipient] := true
+end
+
+procedure SetAuthorizationFalse(recipient: ByStr20)
+  operators[recipient] := false
+end
+
 procedure Exchange(recipient_address : ByStr20, amount : Uint128)
   fung_implementation_ <- fung_implementation;
   wallet_ <- wallet;
@@ -124,27 +133,26 @@ procedure Exchange(recipient_address : ByStr20, amount : Uint128)
   end
 end
 
+transition Init()
+  ops <- & previous_contract.operators;
+  operators := ops
+end 
+
 (* inbound transfer *)
 transition RecipientAcceptTransfer(sender: ByStr20, recipient: ByStr20, amount: Uint128)
-  IsAuthorized;
+  IsAuthorized _sender;
   IsSufficient amount;
   IsXport;
   
   Exchange sender amount
-end 
+end
 
 transition RecipientAcceptTransferFrom(initiator : ByStr20, sender : ByStr20, recipient : ByStr20, amount : Uint128)
-  is_valid_transfer_to_self =
-    let self_triggered = builtin eq initiator _this_address in
-    let is_transfer_to_self = builtin eq recipient _this_address in
-    andb self_triggered is_transfer_to_self;
-
-  match is_valid_transfer_to_self with
-  | False => 
-    e = throw_not_allowed sender;
-    throw e
-  | True => (* no op *)
-  end
+  IsAuthorized sender;
+  IsSufficient amount;
+  IsXport;
+  
+  Exchange sender amount
 end
 
 (* ownership management *)
@@ -186,8 +194,16 @@ end
 (* update operator *)
 transition UpdateOperator(recipient: ByStr20, allowed: Bool)
   IsAdmin;
-  
   operators[recipient] := allowed
+end
+
+(* update operators batched to whitelist/blacklist *)
+transition UpdateOperators(recipients: (List ByStr20), enabled: Bool)
+  IsAdmin;
+  match enabled with
+    | True => forall recipients SetAuthorizationTrue
+    | False => forall recipients SetAuthorizationFalse
+  end
 end
 
 (* toggle honoring the whitelist *)

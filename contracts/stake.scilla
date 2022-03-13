@@ -87,15 +87,28 @@ let throw_is_self = { _exception : "ErrorIsSelf" }
 contract Staking
 (
   init_owner : ByStr20,
-  init_fungible : ByStr20
+  init_fungible : ByStr20,
+  previous_contract: ByStr20 with contract 
+    field pendingAddStake: Map ByStr20 (Pair (ByStr20) (Uint128)),
+    field stakers: Map ByStr20 Uint128,
+    field removeStaker: Map ByStr20 Uint128,
+    field removeBlock: Map ByStr20 BNum,
+    field totalStaked: Uint128,
+    field totalStakers: Uint128,
+    field cumulativeStakes: Map ByStr20 Bool,
+    field pendingRewards: Map ByStr20 Uint128,
+    field rewardBlocks: BNum,
+    field lastReward: BNum,
+    field operators: Map ByStr20 Bool
+  end
 )
+
 (* contract controls *)
 field admin : ByStr20 = init_owner
 field pending_owner : Option ByStr20 = None {ByStr20}
 field fungibleContract : ByStr20 = init_fungible
 field stakingEnabled : Bool = True
 field whitelistEnabled : Bool = true
-field futureContract : ByStr20 = _this_address
 field implementationContract : ByStr20 = _this_address
 
 (* operators map for whitelist *)
@@ -474,7 +487,32 @@ transition Init()
   currentBlock <- & BLOCKNUMBER;
   newRewardBlock = builtin badd currentBlock rewardTimeBlock;
   rewardBlocks := newRewardBlock;
-  lastReward := currentBlock
+  lastReward := currentBlock;
+
+  (* data migrations *)
+  pendingAddStake <- & previous_contract.pendingAddStake;
+  stakers <- & previous_contract.stakers;
+  removeStaker <- & previous_contract.removeStaker;
+  removeBlock <- & previous_contract.removeBlock;
+  totalStaked <- & previous_contract.totalStaked;
+  totalStakers <- & previous_contract.totalStakers;
+  cumulativeStakes <- & previous_contract.cumulativeStakes;
+  pendingRewards <- & previous_contract.pendingRewards;
+  rewardBlocks <- & previous_contract.rewardBlocks;
+  lastReward <- & previous_contract.lastReward;
+  operators <- & previous_contract.operators;
+
+  pendingAddStake := pendingAddStake;
+  stakers := stakers;
+  removeStaker := removeStaker;
+  removeBlock := removeBlock;
+  totalStaked := totalStaked;
+  totalStakers := totalStakers;
+  cumulativeStakes := cumulativeStakes;
+  pendingRewards = pendingRewards;
+  rewardBlocks := rewardBlocks;
+  lastReward := lastReward;
+  operators := operators
 end
 
 transition RewardAll()
@@ -885,11 +923,6 @@ transition UpgradeImplementationTo(newImplementation: ByStr20)
   implementationContract := newImplementation
 end
 
-transition UpgradeFutureImplementationTo(newImplementation: ByStr20)
-  IsAdmin;
-  futureContract := newImplementation
-end
-
 (* update operator *)
 transition UpdateOperator(recipient: ByStr20, allowed: Bool)
   IsAdmin;
@@ -906,170 +939,6 @@ transition ToggleStaking(enabled: Bool)
   IsAdmin;
   stakingEnabled := enabled
 end
-
-(* stakes / unstakes migration *)
-transition TransferStakeToNew(staker_address: ByStr20, staked_amount: Uint128, cycleAmount: Uint128, cycleCount: Int32)
-  IsImplementation _sender;
-  pendingStake <- stakers[staker_address];
-  match pendingStake with
-    | Some pend =>
-      newAmount = builtin add pend staked_amount;
-      stakers[staker_address] := newAmount;
-      cycleAmount[staker_address] := cycleAmount;
-      cycleCount[staker_address] := cycleCount
-    | None =>
-      stakers[staker_address] := staked_amount;
-      cycleAmount[staker_address] := cycleAmount;
-      cycleCount[staker_address] := cycleCount;
-      stakers <- totalStakers;
-      newStaker = builtin add stakers uintOne;
-      totalStakers := newStaker
-  end;
-  staked <- totalStaked;
-  newStaked = builtin add staked staked_amount;
-  totalStaked := newStaked;
-  
-  msg = {_tag : "TransferStakeSuccessfulCallBack"; _recipient: _sender; _amount: Uint128 0;
-          address : staker_address};
-  msgs = one_msg msg;
-  send msgs
-end
-
-
-transition TransferUnstakeToNew(staker_address: ByStr20, unstaked_amount: Uint128, unstaked_blocks: BNum)
-  IsImplementation _sender;
-  pendUnstake <- removeStaker[staker_address];
-  match pendUnstake with
-    | Some pend =>
-      newUnstake = builtin add pend unstaked_amount;
-      removeStaker[staker_address] := newUnstake;
-      removeBlock[staker_address] := unstaked_blocks
-    | None =>
-      removeStaker[staker_address] := unstaked_amount;
-      removeBlock[staker_address] := unstaked_blocks
-  end;
-  unstaked <- totalUnstaked;
-  newUnstaked = builtin add unstaked unstaked_amount;
-  totalUnstaked := newUnstaked; 
-  msg = {_tag : "TransferUnstakeSuccessfulCallBack"; _recipient: _sender; _amount: Uint128 0;
-          address : staker_address};
-  msgs = one_msg msg;
-  send msgs
-end
-
-transition TransferStakeToNewContract(address: ByStr20)
-  IsAdmin;
-  futureAddr <- futureContract;
-  stakers_amount <- stakers[address];
-  cyc_amount <- cycleAmount[address];
-  cyc_Count <- cycleCount[address];
-  stake_amount = get_uint128_val stakers_amount;
-  cycle_Amount = get_uint128_val cyc_amount;
-  cycle_Count = get_int32_val cyc_Count;
-  msg = {_tag : "TransferStakeToNew"; _recipient: futureAddr; _amount: Uint128 0;
-          staker_address: address;staked_amount: stake_amount; cycleAmount : cycle_Amount; cycleCount: cycle_Count};
-  msgs = one_msg msg;
-  send msgs
-end
-
-transition TransferUnstakeToNewContract(address: ByStr20)
-  IsAdmin;
-  futureAddr <- futureContract;
-  unstakeAmount <- removeStaker[address];
-  unstakeBlock <- removeBlock[address];
-  unstaked_amount = get_uint128_val unstakeAmount;
-  unstaked_block =  get_bnum_val unstakeBlock;
-  msg = {_tag : "TransferUnstakeToNew"; _recipient: futureAddr; _amount: Uint128 0;
-          staker_address: address;unstaked_amount: unstaked_amount; unstaked_blocks: unstaked_block};
-  msgs = one_msg msg;
-  send msgs
-end
-
-transition TransferStakeSuccessfulCallBack(address: ByStr20)
-  futureAddr <- futureContract;
-  isFuture = builtin eq futureAddr _sender;
-  match isFuture with
-    | True =>
-      amount_toReturn <- stakers[address];
-      send_amount = get_uint128_val amount_toReturn;
-      total_staked <- totalStaked;
-      newStaked = builtin sub total_staked send_amount;
-      totalStaked := newStaked;
-      total_stakers <- totalStakers;
-      newStakerAmount = builtin sub total_stakers uintOne;
-      totalStakers := newStakerAmount;
-      delete stakers[address];
-      delete cycleAmount[address];
-      delete cycleCount[address];
-      sendFunds futureAddr send_amount
-    | False =>
-      throw throw_not_self
-  end
-end
-
-transition TransferUnstakeSuccessfulCallBack(address: ByStr20)
-  futureAddr <- futureContract;
-  isFuture = builtin eq futureAddr _sender;
-  match isFuture with
-    | True =>
-      amount_toReturn <- removeStaker[address];
-      send_amount = get_uint128_val amount_toReturn;
-      total_unstaked <- totalUnstaked;
-      newUnstaked = builtin sub total_unstaked send_amount;
-      totalUnstaked := newUnstaked;
-      delete removeStaker[address];
-      delete removeBlock[address];
-      sendFunds futureAddr send_amount
-    | False =>
-      throw throw_not_self
-  end
-end
-
-(*
-transition Migrate(
-  legacy_contract: ByStr20 with contract
-    field pendingAddStake: Map ByStr20 (Pair (ByStr20) (Uint128)),
-    field stakers: Map ByStr20 Uint128,
-    field removeStaker: Map ByStr20 Uint128,
-    field removeBlock: Map ByStr20 BNum,
-    field totalStaked: Uint128,
-    field totalStakers: Uint128,
-    field cumulativeStakes: Map ByStr20 Bool,
-    field pendingRewards: Map ByStr20 Uint128,
-    field rewardBlocks: BNum,
-    field lastReward: BNum,
-    field operators: Map ByStr20 Bool
-  end
-)
-  IsAdmin;
-  
-  pendingAddStake <- & legacy_contract.pendingAddStake;
-  stakers <- & legacy_contract.stakers;
-  removeStaker <- & legacy_contract.removeStaker;
-  removeBlock <- & legacy_contract.removeBlock;
-  totalStaked <- & legacy_contract.totalStaked;
-  totalStakers <- & legacy_contract.totalStakers;
-  cumulativeStakes <- & legacy_contract.cumulativeStakes;
-  pendingRewards <- & legacy_contract.pendingRewards;
-  rewardBlocks <- & legacy_contract.rewardBlocks;
-  lastReward <- & legacy_contract.lastReward;
-  operators <- & legacy_contract.operators;
-
-  pendingAddStake := pendingAddStake;
-  stakers := stakers;
-  removeStaker := removeStaker;
-  removeBlock := removeBlock;
-  totalStaked := totalStaked;
-  totalStakers := totalStakers;
-  cumulativeStakes := cumulativeStakes;
-  pendingRewards = pendingRewards;
-  rewardBlocks := rewardBlocks;
-  lastReward := lastReward;
-  operators := operators;
-
-  e = {_eventname : "DataMigrated" };
-  event e
-end*)
 
 (* staking contract ownership transitions *)
 transition RequestOwnershipTransfer(newOwner: ByStr20)
