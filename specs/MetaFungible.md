@@ -2,7 +2,7 @@
 
 Currently, the [ZRC3 standard](https://github.com/Zilliqa/ZRC/blob/main/zrcs/zrc-3.md) Metafungible primarily contains "Cheque cashing" as a means of transfering tokens (primarily abstracting `TransferFrom`), I propose the extension "Meta claims", enabling the means of meta-transfering tokens via `Transfer`, implicitely gated & authorized by the `_sender` (as `Transfer` typically operates), ultimately enabling a hot-wallet or relayer token distribution.
 
-#### 10. Claim()
+#### 10. Claim
 
 ```ocaml
 (* @dev: Enables a cheque signer to recieve/claim tokens from the `_sender` or relayer, while paying for the relayer's gas fee. *)
