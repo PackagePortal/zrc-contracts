@@ -44,7 +44,7 @@ end
 | @param | `pubkey`    | `ByStr33` | Public Key of the token_owner whose balance is to decrease.        |
 | @param | `to`        | `ByStr20` | Address of the recipient whose balance is to increase.             |
 | @param | `amount`    | `Uint128` | Amount of tokens to be sent.                                       |
-| @param | `fee`       | `Uint128` | Reward taken from the cheque senders balance for the relayer.      |
+| @param | `fee`       | `Uint128` | Reward taken/minings fee from the signer's balance to the relayer. |
 | @param | `nonce`     | `Uint128` | A random value included in the cheque to make each unique.         |
 | @param | `signature` | `ByStr64` | The signature of the cheque by the token owner to authorize spend. |
 
