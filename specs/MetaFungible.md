@@ -63,7 +63,7 @@ end
 | `_eventname` | `ClaimSuccess` | claim is successful.     | `initiator`: `ByStr20` which is the _sender's address, `sender`: `ByStr20` which is the token_owner's (and `_sender`'s) address, `recipient`: `ByStr20` which is the recipient's address, and `amount`: `Uint128` which is the amount of fungible tokens to be transferred.                                                                                                                                                                               |
 | `_eventname` | `Error`             | Sending is not successful. | - emit `CodeChequeVoid` if the cheque submitted has already been transferred.<br>- emit `CodeInsufficientFunds` if the balance of the token_owner is lesser than the specified amount that is to be transferred.<br> - emit `CodeSignatureInvalid` if the signature of the cheque does not match the cheque parameters. <br> - emit `CodeInvalidSigner` if the signer of the metatransaction is not the owner of the tokens to be moved. |
 
-Additionally, via batching:
+Additionally, via batching to y'know, save gas:
 ```
 transition BatchClaim(cheques: List (Pair (Pair (Pair ByStr33 ByStr20) (Pair Uint128 Uint128)) (Pair Uint128 ByStr64)))
   (* construct cheque list *)
