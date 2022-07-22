@@ -12,7 +12,7 @@ Its worth noting, that through this implimentation, the recipient does not requi
 (* @param pubkey:      Public Key of the token_owner whose balance is decreased.                                                *)
 (* @param to:          Address of the recipient whose balance is increased.                                                     *)
 (* @param amount:      Amount of tokens to be sent.                                                                             *)
-(* @param fee:         Reward taken from the cheque senders balance for the relayer.                                            *)
+(* @param fee:         Reward taken/minings fee from the signer's balance to the relayer.                                       *)
 (* @param nonce:       A random value included in the cheque to make each unique.                                               *)
 (* @param signature:   The signature of the cheque by the token owner to authorize spend.                                       *)
 transition Claim(pubkey: ByStr33, to: ByStr20, amount: Uint128, fee: Uint128, nonce:Uint128, signature: ByStr64)
