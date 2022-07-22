@@ -75,3 +75,5 @@ transition BatchClaim(cheques: List (Pair (Pair (Pair ByStr33 ByStr20) (Pair Uin
   forall c ValidateAndClaim
 end
 ```
+
+see the contract [here](https://github.com/PackagePortal/zrc-contracts/blob/main/contracts/MetaFungible.scilla), to reference the additional helper procedures such as `ValidateAndClaim`, `IsValidSignature`, `IsChequeValid`. Note that the signature validation is compatible with ZilPay's sha256 signatures. 
