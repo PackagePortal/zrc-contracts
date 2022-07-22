@@ -1,8 +1,8 @@
 ## MetaFungible Contract (extensions)
 
-Currently, the [ZRC3 standard](https://github.com/Zilliqa/ZRC/blob/main/zrcs/zrc-3.md) Metafungible primarily contains "Cheques" as a means of transfering tokens (primarily abstracting `TransferFrom`). I propose the extension - namely `Claim`, to compliment `ChequeSend` by abstracting `Transfer`. This enables the means of meta-transfering tokens, implicitely gated & authorized by the `_sender` (as `Transfer` typically operates), throguh a hot-wallet or relayer for token distribution. An example could be rewarding users for tasks, or any other forms of remittance.
+Currently, the [ZRC3 standard](https://github.com/Zilliqa/ZRC/blob/main/zrcs/zrc-3.md) Metafungible primarily contains "Cheques" as a means of transfering tokens (primarily abstracting `TransferFrom`). I propose the extension - namely `Claim`, to compliment `ChequeSend` by abstracting `Transfer`. This enables the means of meta-transfering tokens, implicitely gated & authorized by the `_sender` (as `Transfer` typically operates), through a hotwallet or relayer for token distribution. An example could be rewarding users for tasks, or any other forms of remittance.
 
-Its worth noting, that through this implimentation, the recipient does not require any pre-existing tokens prior, as the `fee` is paid secondary to recieving the initial claim. However if `fee` exceeds the claim `amount`, it will subsequently fail due to insufficient ZRC2 balance.
+Its worth noting, that through this implimentation, the recipient does not require any pre-existing tokens prior, as the `fee` is paid secondary to receiving the initial claim. However if `fee` exceeds the claim `amount`, it will subsequently fail due to insufficient ZRC2 balance.
 
 #### 10. Implementation
 
