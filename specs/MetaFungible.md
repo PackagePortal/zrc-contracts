@@ -1,8 +1,10 @@
 ## MetaFungible Contract (extensions)
 
-Currently, the [ZRC3 standard](https://github.com/Zilliqa/ZRC/blob/main/zrcs/zrc-3.md) Metafungible primarily contains "Cheque cashing" as a means of transfering tokens (primarily abstracting `TransferFrom`), I propose the extension "Meta claims", enabling the means of meta-transfering tokens via `Transfer`, implicitely gated & authorized by the `_sender` (as `Transfer` typically operates), ultimately enabling a hot-wallet or relayer token distribution.
+Currently, the [ZRC3 standard](https://github.com/Zilliqa/ZRC/blob/main/zrcs/zrc-3.md) Metafungible primarily contains "Cheques" as a means of transfering tokens (primarily abstracting `TransferFrom`). I propose the extension - namely `Claim`, to compliment `ChequeSend` by abstracting `Transfer`. This enables the means of meta-transfering tokens, implicitely gated & authorized by the `_sender` (as `Transfer` typically operates), throguh a hot-wallet or relayer for token distribution. An example could be rewarding users for tasks, or any other forms of remittance.
 
-#### 10. Claim
+Its worth noting, that through this implimentation, the recipient does not require any pre-existing tokens prior, as the `fee` is paid secondary to recieving the initial claim. However if `fee` exceeds the claim `amount`, it will subsequently fail due to insufficient ZRC2 balance.
+
+#### 10. Implementation
 
 ```ocaml
 (* @dev: Enables a cheque signer to recieve/claim tokens from the `_sender` or relayer, while paying for the relayer's gas fee. *)
@@ -13,7 +15,26 @@ Currently, the [ZRC3 standard](https://github.com/Zilliqa/ZRC/blob/main/zrcs/zrc
 (* @param fee:         Reward taken from the cheque senders balance for the relayer.                                            *)
 (* @param nonce:       A random value included in the cheque to make each unique.                                               *)
 (* @param signature:   The signature of the cheque by the token owner to authorize spend.                                       *)
-transition Claim(pubkey: ByStr20, to: ByStr20, amount: Uint128, fee: Uint128, nonce:Uint218, signature: ByStr64)
+transition Claim(pubkey: ByStr33, to: ByStr20, amount: Uint128, fee: Uint128, nonce:Uint128, signature: ByStr64)
+  from = extract_from pubkey;
+  cheque_hash = hash_cheque to amount fee nonce signature _this_address;
+  IsChequeValid cheque_hash;
+  IsValidSignature pubkey cheque_hash signature;
+  
+  AuthorizedMoveIfSufficientBalance _sender to amount;
+  AuthorizedMoveIfSufficientBalance from _sender fee;
+  
+  void_cheques[cheque_hash] := _sender;
+  e = {_eventname : "ClaimSuccess"; initiator : _sender; sender: _sender; recipient : to; amount : amount; fee : fee};
+  event e;
+  (* Prevent sending to a contract address that does not support transfers of token *)
+  msg_to_recipient = {_tag : "RecipientAcceptTransfer"; _recipient : to; _amount : zero; 
+                      sender : _sender; recipient : to; amount : amount};
+  msg_to_sender = {_tag : "TransferSuccessCallBack"; _recipient : _sender; _amount : zero; 
+                  sender : _sender; recipient : to; amount : amount};
+  msgs = two_msgs msg_to_recipient msg_to_sender;
+  send msgs
+end
 ```
 
 **Arguments:**
